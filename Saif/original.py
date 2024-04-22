@@ -1,106 +1,84 @@
 #!/usr/bin/env python3
-from adafruit_servokit import ServoKit
+import time
+import pigpio
 import numpy as np
-import math as m
 import rospy
 
 class HardwareInterface():
-    def __init__(self,link):
-        self.pwm_max = 2400
-        self.pwm_min = 370
-        self.link = link
-        self.servo_angles = np.zeros((3,4))
-        self.kit = ServoKit(channels=16) #Defininng a new set of servos uising the Adafruit ServoKit LIbrary
-        
-        """ SERVO INDICES, CALIBRATION MULTIPLIERS AND OFFSETS
-            #   ROW:    which joint of leg to control 0:hip, 1: upper leg, 2: lower leg
-            #   COLUMN: which leg to control. 0: front-right, 1: front-left, 2: back-right, 3: back-left.
-
-                #               0                  1                2               3
-                #  0 [[front_right_hip  , front_left_hip  , back_right_hip  , back_left_hip  ]
-                #  1  [front_right_upper, front_left_upper, back_right_upper, back_left_upper]
-                #  2  [front_right_lower, front_left_lower, back_right_lower, back_left_lower]] 
-
-           'pins' define the physical pin of the servos on the servoboard """
+    def __init__(self, pins):#or link
+        self.pi = pigpio.pi()  # Initialize the pigpio library
         self.pins = np.array([[2, 14, 18, 23], [3, 15, 27, 24], [4, 17, 22, 25]])
-        """ 'servo_multipliers' and 'complementary_angle' both work to flip some angles, x, to (180-x) so that movement on each leg is consistent despite
-            physical motor oritentation changes """
-        self.servo_multipliers = np.array(
-                            [[-1, 1, 1, -1], 
-                            [1, -1, 1, -1], 
-                            [1, -1, 1, -1]])
-        self.complementary_angle = np.array(
-                            [[180, 0, 0, 180], 
-                            [0, 180, 0, 180], 
-                            [0, 180, 0, 180]])
-
-        """ 'physical_calibration_offsets' are the angle required for the servo to be at their 'zero'locations. These zero locations
-            are NOT the angles deifned in the IK, but rather locations that allow practical usage of the servo's 180 degree range of motion. 
-
-            - Offsets for HIP servos allign the hip so that the leg is perfectly vertical at an input of zero degrees, direct from the IK.
-            - Offsets for UPPER leg servos map allign the servo so that it is horizontal toward the back of the robot at an input of zero degrees, direct from the IK. 
-            - Offsets for LOWER leg servos map allign the servo so that it is vertically down at zero degrees. Note that IK requires a transformation of
-                angle_sent_to_servo = (180-angle_from_IK) + 90 degrees to map to this physcial servo location.  """
-        self.physical_calibration_offsets = np.array(
-                    [[75, 130, 113, 73],
-                    [29, 13, 33, 15],
-                    [26, 12, 30, 4]])
-        #applying calibration values to all servos
-        self.create()
-
-    def create(self):
-        for i in range(16):
-            self.kit.servo[i].actuation_range = 180
-            self.kit.servo[i].set_pulse_width_range(self.pwm_min, self.pwm_max)
+        self.servo_angles = np.zeros((3, 4)) 
+        self.servo_multipliers = np.array([[-1, 1, 1, -1], [1, -1, 1, -1], [1, -1, 1, -1]])
+        self.complementary_angle = np.array([[180, 0, 0, 180], [0, 180, 0, 180], [0, 180, 0, 180]])
+        self.physical_calibration_offsets = np.array([[4, 2, 0, -4], [107, 128, 86, 5], [-55, 31, 65, -21]])
+        
+        # Setup each pin for PWM output with the pigpio library
+        for leg_index in range(4):
+            for axis_index in range(3):
+                pin = self.pins[axis_index, leg_index]
+                self.pi.set_mode(pin, pigpio.OUTPUT)
+                self.pi.set_PWM_frequency(pin, 50)
+                self.pi.set_PWM_range(pin, 255)  # 255 by default, adjust if needed
 
     def set_actuator_postions(self, joint_angles):
-        """Converts all angles found via inverse kinematics to the angles needed at the servo by applying multipliers
-        and offsets for complimentary angles.
-        It then outputs the correct angle to the servo via the adafruit servokit library. 
-
-        Parameters
-        ----------
-        joint_angles : 3x4 numpy array of float angles (radians)
-        """
-        # Limit angles ot physical possiblity
-        possible_joint_angles = impose_physical_limits(joint_angles)
-        
-        #Convert to servo angles
+        possible_joint_angles = self.impose_physical_limits(joint_angles)
         self.joint_angles_to_servo_angles(possible_joint_angles)
 
-        # print('Final angles for actuation: ',self.servo_angles)    
         for leg_index in range(4):
             for axis_index in range(3):
                 try:
-                    self.kit.servo[self.pins[axis_index,leg_index]].angle = self.servo_angles[axis_index,leg_index]
-                except:
-                    rospy.logwarn("Warning - I2C IO error")
+                    angle = self.servo_angles[axis_index, leg_index]
+                    duty_cycle = self.angle_to_duty_cycle(angle)
+                    pin = self.pins[axis_index, leg_index]
+                    self.pi.set_PWM_dutycycle(pin, duty_cycle)
+                except Exception as e:
+                    rospy.logwarn(f"Warning - GPIO IO error on servo {axis_index}, {leg_index}: {str(e)}")
+
+    def angle_to_duty_cycle(self, angle):
+        # Convert angle to duty cycle; this is just an example, adjust based on your servo specs
+        return int((angle / 180.0) * 255)
+
+    def impose_physical_limits(self, joint_angles):
+        # Apply physical limit checks here
+        return joint_angles
+
+    def joint_angles_to_servo_angles(self, joint_angles):
+        # Convert or map joint angles to servo angles here
+        self.servo_angles = joint_angles  # Simplified for example
+
+    def cleanup(self):
+        # Clean up by stopping all PWM signals
+        for leg_index in range(4):
+            for axis_index in range(3):
+                pin = self.pins[axis_index, leg_index]
+                self.pi.set_PWM_dutycycle(pin, 0)
+        self.pi.stop()
 ## HERE ##
 
     ##  This method is used only in the calibrate servos file will make something similar to command individual actuators. 
     # def set_actuator_position(self, joint_angle, axis, leg):
     #     send_servo_command(self.pi, self.pwm_params, self.servo_params, joint_angle, axis, leg)
-    def relax_all_motors(self,servo_list = np.ones((3,4))):
-        """Relaxes desired servos so that they appear to be turned off. 
+    def relax_all_motors(self, servo_list=np.ones((3, 4))):
 
-        Parameters
-        ----------
-        servo_list : 3x4 numpy array of 1's and zeros. Row = Actuator; Column = leg.
-                    If a Given actuator is 0 is 1 it should be deactivated, if it is 0 is should be left on. 
-        """
-        for leg_index in range(4):
-            for axis_index in range(3):
-                if servo_list[axis_index,leg_index] == 1:
-                    self.kit.servo[self.pins[axis_index,leg_index]].angle = None
+     for leg_index in range(4):
+        for axis_index in range(3):
+            if servo_list[axis_index, leg_index] == 1:
+                # Stop the PWM signal to relax the motor
+                servo_pin = self.pins[axis_index, leg_index]
+                self.servo_pwm[(axis_index, leg_index)].ChangeDutyCycle(0)
+            elif servo_list[axis_index, leg_index] == 0:
+                # If the motor should stay active, ensure it's set to its current angle
+                angle = self.servo_angles[axis_index, leg_index]
+                duty_cycle = self.angle_to_duty_cycle(angle)
+                self.servo_pwm[(axis_index, leg_index)].ChangeDutyCycle(duty_cycle)
 
 
     def joint_angles_to_servo_angles(self,joint_angles):
         """Converts joint found via inverse kinematics to the angles needed at the servo using linkage analysis.
-
         Parameters
         ----------
         joint_angles : 3x4 numpy array of float angles (radians)
-
         Returns
         -------
         servo_angles: 3x4 numpy array of float angles (degrees)
@@ -121,7 +99,7 @@ class HardwareInterface():
 
         # Adding final physical offset angles from servo calibration and clipping to 180 degree max
         self.servo_angles = np.clip(self.servo_angles + self.physical_calibration_offsets,0,180)
-        
+
         # print('Unflipped servo_angles: ',self.servo_angles)
 
         #Accounting for difference in configuration of servos (some are mounted backwards)
@@ -136,7 +114,6 @@ class HardwareInterface():
 def calculate_4_bar(th2 ,a,b,c,d):
     """Using 'Freudensteins method', it finds all the angles within a 4 bar linkage with vertices ABCD and known link lengths a,b,c,d
     defined clockwise from point A, and known angle, th2.
-
     Parameters
     ----------
     th2 : float
@@ -153,27 +130,27 @@ def calculate_4_bar(th2 ,a,b,c,d):
     # print('th2: ',m.degrees(th2),'a: ',a,'b: ',b,'c: ',c,'d: ',d)    
     x_b = a*np.cos(th2)
     y_b = a*np.sin(th2)
-    
+
     #define diagnonal f
     f = np.sqrt((d-x_b)**2 +y_b**2)
     beta = np.arccos((f**2+c**2-b**2)/(2*f*c))
     gamma = np.arctan2(y_b,d-x_b)
-    
+
     th4 = np.pi - gamma - beta
-    
+
     x_c = c*np.cos(th4)+d
     y_c = c*np.sin(th4)
-    
+
     th3 = np.arctan2((y_c-y_b),(x_c-x_b))
-    
-    
+
+
     ## Calculate remaining internal angles of linkage
     ABC = np.pi-th2 + th3
     BCD  = th4-th3
     CDA = np.pi*2 - th2 - ABC - BCD
-                    
+
     return ABC,BCD,CDA
-    
+
 
 
 def lower_leg_angle_to_servo_angle(link, THETA2, THETA3):
@@ -188,7 +165,6 @@ def lower_leg_angle_to_servo_angle(link, THETA2, THETA3):
     link: Leg_linage
         A linkage class with all link lengths and relevant angles stored. Link values are based off
         the physcial design of the link
-
     Returns
     -------
     THETA0: float
@@ -213,7 +189,6 @@ def impose_physical_limits(desired_joint_angles):
         ----------
     desired_joint_angles : numpy array 3x4 of float angles (radians)
         Desired angles of all joints for all legs from inverse kinematics
-
     Returns
     -------
     possble_joint_angles: numpy array 3x4 of float angles (radians)
@@ -255,138 +230,3 @@ def impose_physical_limits(desired_joint_angles):
         possible_joint_angles[:,i] =  hip,upper,lower
 
     return np.radians(possible_joint_angles)
-
-################################# TESING HARDWARE INTERFACING ############################
-""" This section can be used to test this hardware interfacing by running this script only and supplying 
-    angles for the legs in the joint space. Uncomment and then run using the command: 
-                        rosrun dingo_servo_interfacing HardwareInterface.py  
-"""
-# from dingo_control.Config import Configuration,Leg_linkage
-
-# configuration = Configuration()
-# linkage = Leg_linkage(configuration)
-# hardware_interface = HardwareInterface(linkage)
-
-# ## Define a position for all legs in the joint space
-# low = [0,30,20]
-# mid = [0,50,-10]
-# high = [0,60,-40]
-# pos = mid #[0,50,0] [low 30,20]
-
-# hip_angle  = m.radians(pos[0])
-# upper_leg_angle = m.radians(pos[1]) #defined accoridng to IK
-# lower_leg_angle = m.radians(pos[2]) #defined accoridng to IK
-
-
-# joint_angles = np.array([[hip_angle,     hip_angle,      hip_angle,      hip_angle      ], 
-#                         [upper_leg_angle,upper_leg_angle,upper_leg_angle,upper_leg_angle], 
-#                         [lower_leg_angle,lower_leg_angle,lower_leg_angle,lower_leg_angle]])
-
-# hardware_interface.set_actuator_postions(joint_angles)
-
-##########################################################################################
-
-
-
-
-# ORIGINAL CODE BELOW
-
-# class HardwareInterface:
-#     def __init__(self):
-#         self.pi = pigpio.pi()
-#         self.pwm_params = PWMParams()
-#         self.servo_params = ServoParams()
-#         initialize_pwm(self.pi, self.pwm_params)
-
-    # def set_actuator_postions(self, joint_angles):
-    #     send_servo_commands(self.pi, self.pwm_params, self.servo_params, joint_angles)
-    #     ##  THis method is used only in the calibrate servos file
-    # def set_actuator_position(self, joint_angle, axis, leg):
-    #     send_servo_command(self.pi, self.pwm_params, self.servo_params, joint_angle, axis, leg)
-
-
-# def pwm_to_duty_cycle(pulsewidth_micros, pwm_params):
-#     """Converts a pwm signal (measured in microseconds) to a corresponding duty cycle on the gpio pwm pin
-
-#     Parameters
-#     ----------
-#     pulsewidth_micros : float
-#         Width of the pwm signal in microseconds
-#     pwm_params : PWMParams
-#         PWMParams object
-
-#     Returns
-#     -------
-#     float
-#         PWM duty cycle corresponding to the pulse width
-#     """
-#     return int(pulsewidth_micros / 1e6 * pwm_params.freq * pwm_params.range)
-
-
-# def angle_to_pwm(angle, servo_params, axis_index, leg_index):
-#     """Converts a desired servo angle into the corresponding PWM command
-
-#     Parameters
-#     ----------
-#     angle : float
-#         Desired servo angle, relative to the vertical (z) axis
-#     servo_params : ServoParams
-#         ServoParams object
-#     axis_index : int
-#         Specifies which joint of leg to control. 0 is hip abduction servo, 1 is upper leg servo, 2 is lower leg servo.
-#     leg_index : int
-#         Specifies which leg to control. 0 is front-right, 1 is front-left, 2 is back-right, 3 is back-left.
-
-#     Returns
-#     -------
-#     float
-#         PWM width in microseconds
-#     """
-#     angle_deviation = (
-#         angle - servo_params.neutral_angles[axis_index, leg_index]
-#     ) * servo_params.servo_multipliers[axis_index, leg_index]
-#     pulse_width_micros = (
-#         servo_params.neutral_position_pwm
-#         + servo_params.micros_per_rad * angle_deviation
-#     )
-#     return pulse_width_micros
-
-
-# def angle_to_duty_cycle(angle, pwm_params, servo_params, axis_index, leg_index):
-#     return pwm_to_duty_cycle(
-#         angle_to_pwm(angle, servo_params, axis_index, leg_index), pwm_params
-#     )
-
-
-# def initialize_pwm(pi, pwm_params):
-#     for leg_index in range(4):
-#         for axis_index in range(3):
-#             pi.set_PWM_frequency(
-#                 pwm_params.pins[axis_index, leg_index], pwm_params.freq
-#             )
-#             pi.set_PWM_range(pwm_params.pins[axis_index, leg_index], pwm_params.range)
-
-
-# def send_servo_commands(pi, pwm_params, servo_params, joint_angles):
-#     for leg_index in range(4):
-#         for axis_index in range(3):
-#             duty_cycle = angle_to_duty_cycle(
-#                 joint_angles[axis_index, leg_index],
-#                 pwm_params,
-#                 servo_params,
-#                 axis_index,
-#                 leg_index,
-#             )
-#             pi.set_PWM_dutycycle(pwm_params.pins[axis_index, leg_index], duty_cycle)
-
-
-# def send_servo_command(pi, pwm_params, servo_params, joint_angle, axis, leg):
-#     duty_cycle = angle_to_duty_cycle(joint_angle, pwm_params, servo_params, axis, leg)
-#     pi.set_PWM_dutycycle(pwm_params.pins[axis, leg], duty_cycle)
-
-
-# def deactivate_servos(pi, pwm_params):
-#     for leg_index in range(4):
-#         for axis_index in range(3):
-#             # REPLACE THIS WITH AN EQUIVALENT FUNCTION
-#             # pi.set_PWM_dutycycle(pwm_params.pins[axis_index, leg_index], 0)
